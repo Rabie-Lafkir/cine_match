@@ -1,0 +1,52 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+*.egg-info/
+
+# Environment variables
+.env
+
+# Flask cache and logs
+instance/
+.webassets-cache
+*.log
+
+# IDE / Editor settings
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS / System files
+.DS_Store
+Thumbs.db
+
+# Test / Coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+coverage.xml
+.pytest_cache/
+.cache/
+
+# Jupyter and notebook checkpoints (if any)
+.ipynb_checkpoints/
+
+# DB or generated content (if any)
+*.sqlite3
+*.db
+
+# Poster cache if generated dynamically
+static/posters/
+
+
+# data (large)
+data
