@@ -1,108 +1,70 @@
-"""
-CineMatch Flask API – MovieLens-25M (filters + sorting, fixed year issue)
-"""
-
-from functools import lru_cache
-from typing import List, Dict, Tuple
-import time
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from recommender import PureSVDRecommender
+import time
 
-from recommender import ItemCFRecommender
-
-# ── App setup ───────────────────────────
 app = Flask(__name__)
-CORS(app, origins="*")
-rec_engine = ItemCFRecommender(root="data/ml-25m")
+CORS(app)
 
-# ── Movie cache ─────────────────────────
-ALL_MOVIES: List[Dict] = []
-SAMPLE_CACHE: Dict[int, List[Dict]] = {}
+# ── Initialize recommender ────────────────────────────
+print("🔁 Initializing Pure SVD Recommender …")
+rec = PureSVDRecommender(sample_users=5000, sample_movies=5000)
+print("✅ PureSVD ready")
 
-def get_sample(sample: str) -> List[Dict]:
-    global ALL_MOVIES
-    if sample == "all":
-        if not ALL_MOVIES:
-            print("📦 Caching full movie list …", flush=True)
-            ALL_MOVIES = rec_engine.all_movies()
-            print(f"✅ {len(ALL_MOVIES)} movies cached", flush=True)
-        return ALL_MOVIES
-    k = int(sample)
-    if k not in SAMPLE_CACHE:
-        SAMPLE_CACHE[k] = rec_engine.sample_movies(k)
-    return SAMPLE_CACHE[k]
 
-@lru_cache(maxsize=1024)
-def slice_page(
-    sample: str, title_q: str, genre_q: str, year_q: str,
-    sort_by: str, order: str,
-    page: int, per_page: int
-) -> Tuple[List[Dict], int]:
-    movies = get_sample(sample)
-
-    # ── Filters ─────────────────────────────
+# ── Helper functions ──────────────────────────────────
+def apply_filters(movies, genre_q, year_q, title_q):
     if title_q:
         movies = [m for m in movies if title_q in m["title"].lower()]
     if genre_q:
         movies = [m for m in movies if genre_q in m.get("genres", "").lower()]
     if year_q:
-        def safe_year_filter(m):
-            try:
-                y = int(float(m["year"]))
-                if year_q.lower() == "older":
-                    return y < 2000
-                elif year_q.isdigit():
-                    return y == int(year_q)
-                elif year_q.startswith(">="):
-                    return y >= int(year_q[2:])
-                elif year_q.startswith("<="):
-                    return y <= int(year_q[2:])
-            except:
-                return False
-            return False
-        movies = [m for m in movies if safe_year_filter(m)]
+        try:
+            movies = [m for m in movies if str(m["year"]).startswith(str(year_q))]
+        except Exception:
+            pass
+    return movies
 
-    # ── Sorting ─────────────────────────────
+def apply_sorting(movies, sort_by, order):
     reverse = order == "desc"
     if sort_by == "rating":
         movies.sort(key=lambda m: m.get("avgRating", 0), reverse=reverse)
     elif sort_by == "year":
-        def safe_year(m):
-            try:
-                return int(float(m.get("year", 0)))
-            except:
-                return 0
-        movies.sort(key=safe_year, reverse=reverse)
+        movies.sort(key=lambda m: int(m.get("year", 0)), reverse=reverse)
     elif sort_by == "title":
         movies.sort(key=lambda m: m["title"].lower(), reverse=reverse)
+    return movies
 
-    # ── Pagination ──────────────────────────
+# ── Routes ─────────────────────────────────────────────
+@app.route("/api/movies", methods=["GET"])
+def get_movies():
+    t0 = time.perf_counter()
+
+    sample_param = request.args.get("sample", "150")
+    page = max(int(request.args.get("page", 1)), 1)
+    per_page = max(min(int(request.args.get("per_page", 30)), 200), 1)
+    title_q = (request.args.get("search") or "").lower().strip()
+    genre_q = (request.args.get("genre") or "").lower().strip()
+    year_q = (request.args.get("year") or "").strip()
+    sort_by = request.args.get("sort", "rating").strip().lower()
+    order = request.args.get("order", "desc").strip().lower()
+
+    # Get base movie list
+    if sample_param == "all":
+        movies = rec.all_movies()
+    else:
+        sample_size = int(sample_param)
+        movies = rec.sample_movies(sample_size)
+
+    # Apply filters and sorting
+    movies = apply_filters(movies, genre_q, year_q, title_q)
+    movies = apply_sorting(movies, sort_by, order)
+
+    # Pagination
     total = len(movies)
     start = (page - 1) * per_page
     end = start + per_page
-    return movies[start:end], total
-
-# ── Routes ────────────────────────────────
-@app.get("/api/movies")
-def movies_route():
-    t0 = time.perf_counter()
-
-    # Params
-    sample    = request.args.get("sample", "all")
-    page      = max(int(request.args.get("page", 1)), 1)
-    per_page  = max(min(int(request.args.get("per_page", 30)), 200), 1)
-    title_q   = (request.args.get("search") or "").lower().strip()
-    genre_q   = (request.args.get("genre") or "").lower().strip()
-    year_q    = (request.args.get("year") or "").strip()
-    sort_by   = request.args.get("sort", "rating").strip().lower()
-    order     = request.args.get("order", "desc").strip().lower()
-
-    print(f"📥 /api/movies → page={page} genre={genre_q} year={year_q} sort={sort_by}/{order}", flush=True)
-
-    page_items, total = slice_page(
-        sample, title_q, genre_q, year_q, sort_by, order, page, per_page
-    )
+    page_items = movies[start:end]
 
     return jsonify({
         "movies": page_items,
@@ -113,17 +75,19 @@ def movies_route():
         "elapsed_ms": round((time.perf_counter() - t0) * 1000, 1)
     })
 
-@app.post("/api/recommend")
+@app.route("/api/recommend", methods=["POST"])
 def recommend():
     body = request.get_json(force=True, silent=True) or {}
     rating_list = body.get("ratings", [])
-    recs = rec_engine.recommend_for_new_user(rating_list, 10, 6)
+    if not rating_list or len(rating_list) < 3:
+        return jsonify({"error": "Need at least 3 ratings"}), 400
+    recs = rec.recommend_for_new_user(rating_list, top_n=10)
     return jsonify({"recommended": recs})
 
-@app.get("/api/health")
+@app.route("/api/health", methods=["GET"])
 def health():
-    return {"status": "ok"}
+    return jsonify({"status": "ok"})
 
-# ── Run ───────────────────────────────────
+# ── Run ────────────────────────────────────────────────
 if __name__ == "__main__":
-    app.run(debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, debug=True)
